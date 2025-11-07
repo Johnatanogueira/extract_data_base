@@ -8,7 +8,7 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-def athena_execute_query(query, database = 'temp_db', s3_output = 's3://claims-management-athena-results/ClaimsManagementDataCatalog'):
+def athena_execute_query(query, database = 'xxxxxxxxxxxx', s3_output = 'xxxxxxxxxxxxxxxxxxxx'):
   try:
     start = time.perf_counter()
     logger.debug(f"Athena execute query: \n{query}")
@@ -28,8 +28,8 @@ def athena_execute_query(query, database = 'temp_db', s3_output = 's3://claims-m
   
 def athena_get_generator(
     athena_query:str, 
-    athena_database:str='temp_db', 
-    s3_output:str='s3://claims-management-athena-results/ClaimsManagementDataCatalog', 
+    athena_database:str='xxxxxxxxxxxxxxxx', 
+    s3_output:str='xxxxxxxxxxxxxxxx', 
     chunk_size:int=None
   ):
   try:
