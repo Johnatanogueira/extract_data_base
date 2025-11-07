@@ -12,7 +12,7 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-MAX_MSSQL_QUERY_LENGTH = 7800 # 8000 is the real, Set 7800 to overhead on char sum imprecision
+MAX_MSSQL_QUERY_LENGTH = 7800
 
 def mssql_get_connection(
     host,
@@ -153,7 +153,7 @@ def build_cte_values_query(df, query):
         row_values.append(str(value))
     
     str_row = '(' + ', '.join(row_values) + ')'
-    temp_str_count += len(str_row) + 4 # + 4 Because of the size of ",\n  ", which is used in the join of these values
+    temp_str_count += len(str_row) + 4
     
     if( ( len(cte_pattern) + temp_str_count + query_len )  >= MAX_MSSQL_QUERY_LENGTH):
       values_sql = f"SELECT * FROM (VALUES\n  " + ",\n  ".join(values_sql_parts) + f"\n) AS t ({columns_sql})"
