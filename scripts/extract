@@ -1,0 +1,152 @@
+import pandas as pd
+import sys
+import os
+
+from utils.config import handle_env_vars, get_provider_secret, handle_default_vars, PROJECT_PATH
+from utils.mssql import mssql_get_connection, mssql_query_to_dataframe, mssql_insert_temp_table, build_open_query
+from utils.s3 import s3_delete_objects_on_path, s3_to_parquet
+from utils.athena import athena_execute_query, athena_get_generator
+from utils.logger import get_logger
+
+logger = get_logger('aging_claims')
+
+# Env Vars
+__ENV_VARS = [
+  'PROVIDER',
+  'MEDITECH_SECRET_ID'
+]
+
+__OPT_ENV_VARS = [
+  'MEDITECH_MSSQL_SERVER_NAME',
+  'ATHENA_OUTPUT_DB',
+  'ATHENA_OUTPUT_TABLE',
+  'BATCH_ID',
+  'DAYS'
+]
+
+# Provider config
+
+PROVIDER = handle_env_vars(
+  required  = __ENV_VARS,
+  optional  = __OPT_ENV_VARS
+)
+
+PROVIDER = handle_default_vars(
+  env_vars    = PROVIDER,
+  runner  = 'xxxxxxxxxxxxx'
+)
+
+# Consts
+
+MSSQL_DATABASES = PROVIDER['xxxxxxxxxxxxxx']
+OUTPUT_S3_LOCATION = f'xxxxxxxxxxxxxxxxxxxxxxxx/{PROVIDER['ATHENA_OUTPUT_DB']}/{PROVIDER['ATHENA_OUTPUT_TABLE']}'
+ATHENA_QUERY_OUTPUT_S3_PATH:str = 'xxxxxxxxxxxxxxxxxxxxxxxxx'
+SUB_PROVIDER = PROVIDER.get('SUB_PROVIDER', False)
+LINKED_SERVER = PROVIDER.get('LINKED_SERVER', False)
+DAYS = int(PROVIDER['DAYS']) 
+
+
+if __name__ == '__main__':
+  try:
+    logger.info(f"Start")
+
+    qry_create_athena_table = ''
+    with open( os.path.join(PROJECT_PATH, PROVIDER['QUERIES']['CREATE_OUTPUT_TABLE_FILE'] ) , 'r') as f:
+      lines = f.readlines()
+      partition_names = [partition.split()[0] for partition in  PROVIDER['PARTITIONS']]
+      
+      for i in range(len(lines)):
+        for p in partition_names:
+          if( p in lines[i]):
+            if(lines[i+1].strip() == ')'):
+              lines[i] = lines[i].replace(',', '')
+            else:
+              lines[i] = ''
+              
+      qry_create_athena_table = ''.join(lines)
+      qry_create_athena_table = qry_create_athena_table.format(
+        athena_output_database = PROVIDER['ATHENA_OUTPUT_DB'],
+        athena_output_table_name = PROVIDER['ATHENA_OUTPUT_TABLE'],
+        OUTPUT_S3_LOCATION = OUTPUT_S3_LOCATION,
+        PARTITIONS = ','.join(PROVIDER['PARTITIONS'])
+      )
+      
+    with open( os.path.join(PROJECT_PATH, PROVIDER['QUERIES']['AGING_CLAIMS'] ), 'r' ) as f:
+        qry_aging_claims = ''.join(f.readlines())
+        extra_filters = ''
+        mssql_database_name = MSSQL_DATABASES[0]
+      
+        if(LINKED_SERVER):
+            qry_aging_claims = build_open_query(
+            raw_query = qry_aging_claims,
+            linked_server = LINKED_SERVER
+            )
+      
+        qry_aging_claims = qry_aging_claims.format(
+            provider = PROVIDER['PROVIDER'],
+            days = DAYS,
+            mssql_database_name = mssql_database_name
+        )
+
+
+    HOST, PORT, DATABASE, USER, PASSWORD = get_provider_secret(
+      provider = PROVIDER['PROVIDER'],
+      meditech_secret_id = PROVIDER['MEDITECH_SECRET_ID'],
+      meditech_mssql_server_name = PROVIDER.get('MEDITECH_MSSQL_SERVER_NAME')
+    )
+
+    logger.info(f"Creating table {PROVIDER['ATHENA_OUTPUT_DB']}.{PROVIDER['ATHENA_OUTPUT_TABLE']} on athena if not exists")
+    athena_execute_query(query=qry_create_athena_table)    
+    
+    s3_file_prefix = f"{PROVIDER.get('MEDITECH_MSSQL_SERVER_NAME', PROVIDER['PROVIDER'])}_"
+
+
+    with mssql_get_connection (
+        host              = HOST,
+        user              = USER,
+        password          = PASSWORD,
+        port              = PORT,
+        database          = DATABASE,
+        conn_str_pattern  = PROVIDER['CONN_STR']) as conn:
+        mssql_df = mssql_query_to_dataframe(
+            cur_conn = conn,
+            qry = qry_aging_claims
+        )
+
+    if SUB_PROVIDER:
+        mssql_df['sub_provider'] = SUB_PROVIDER
+    if 'BATCH_ID' in PROVIDER:
+        mssql_df['batch'] = PROVIDER['BATCH_ID']
+
+    total_mssql_rows = mssql_df.shape[0]
+    logger.info(f"{mssql_df.shape[0]} extracted from Meditech MSSQL")
+
+    partition_cols = [p.split()[0] for p in PROVIDER['PARTITIONS']]
+    
+    processed = []
+    for _, row in mssql_df[partition_cols].drop_duplicates().iterrows():
+        str_row = [str(r) for r in row]
+        s3_path_partitions = ['='.join(i) for i in zip(partition_cols, str_row)]
+        s3_path = '/'.join([OUTPUT_S3_LOCATION] + s3_path_partitions + [s3_file_prefix])
+        if s3_path not in processed:
+            logger.info(f"Cleaning S3 path to new load: {s3_path}")
+            s3_delete_objects_on_path(s3_path)
+            processed.append(s3_path)
+
+    s3_to_parquet(
+        df=mssql_df,
+        table=PROVIDER['ATHENA_OUTPUT_TABLE'],
+        database=PROVIDER['ATHENA_OUTPUT_DB'],
+        filename_prefix=s3_file_prefix,
+        partition_cols=partition_cols
+    )
+
+    
+    logger.info(f"Meditech  output size: {total_mssql_rows}")
+
+    athena_execute_query(query = f'MSCK REPAIR TABLE {PROVIDER['ATHENA_OUTPUT_DB']}.{PROVIDER['ATHENA_OUTPUT_TABLE']}')
+    logger.info("Success")
+    
+  except Exception as e:
+    logger.error(e)
+    raise e
